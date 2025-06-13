@@ -120,15 +120,25 @@ else:
             ax1.axvline(ruin, color='red', linestyle='--', label=f'Reserve Empty Day: {ruin}')
             ax1.legend()
         st.pyplot(fig1)
-        # Plot inflation %
+                # Plot inflation %
         fig2, ax2 = plt.subplots()
         ax2.plot(range(1, sim_days+1), inflation_series)
         ax2.set_xlabel('Day')
         ax2.set_ylabel('Cumulative Inflation (%)')
         st.pyplot(fig2)
+
+        # Compute and display monthly and annual inflation
+        if sim_days >= 30:
+            monthly_infl = inflation_series[29]
+            st.write(f"- **Inflation after 1 month:** {monthly_infl:.2f}%")
+        annual_infl = inflation_series[-1]
+        st.write(f"- **Inflation after {sim_days} days:** {annual_infl:.2f}%")
+
         if ruin:
             st.warning(f"Reserve depleted on day {ruin}")
         else:
+            st.success("Reserve remains positive through simulation.")
+
             st.success("Reserve remains positive through simulation.")
 
 st.caption("Use Market Depth to cap conversions by $ depth, or Reward Allocation to simulate reserve and inflation.")
