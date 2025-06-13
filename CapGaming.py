@@ -38,26 +38,30 @@ class LoyaltyCapCalculator:
     def simulate_allocation(self, days=365):
         if self.sand_reserve is None or self.circulating_supply is None:
             raise ValueError("Sand reserve and circulating supply required for reward allocation.")
-        remaining_reserve = self.sand_reserve
-        current_supply = self.circulating_supply
+        initial_reserve = self.sand_reserve
+        initial_supply = self.circulating_supply
+        remaining_reserve = initial_reserve
+        current_supply = initial_supply
         reserve_series = []
-        supply_series = []
+        inflation_series = []
         ruin_day = None
+        days_in_month = calendar.monthrange(datetime.utcnow().year, datetime.utcnow().month)[1]
         for day in range(1, days+1):
-            # user conversion in points
+            # user conversion in points and dollars
             daily_points = self.avg_active_users * self.avg_conversion_per_user
-            # convert to SAND
             daily_sand = daily_points * self.price_per_point
+            # track daily volume in $
+            daily_dollars = daily_sand
             # deplete reserve, increase supply
             remaining_reserve = max(remaining_reserve - daily_sand, 0)
             current_supply += daily_sand
+            # compute cumulative inflation %
+            inflation_pct = (current_supply - initial_supply) / initial_supply * 100
             reserve_series.append(remaining_reserve)
-            supply_series.append(current_supply)
+            inflation_series.append(inflation_pct)
             if ruin_day is None and remaining_reserve == 0:
                 ruin_day = day
-        # compute total inflation rate = (final_supply - initial) / initial
-        total_inflation = (current_supply - self.circulating_supply) / self.circulating_supply
-        return reserve_series, supply_series, ruin_day, total_inflation
+        return reserve_series, inflation_series, ruin_day
 
 # --- Streamlit App ---
 st.set_page_config(page_title="Loyalty Cap & Allocation Tool", layout="centered")
@@ -77,7 +81,7 @@ if method == "Market Depth":
             price_per_point=price_per_point
         )
         total_pts, per_user = calc.cap_market_depth()
-        st.write(f"- **Total Convertible:** {total_pts:,.0f} points (~${max_dollar:,.2f})")
+        st.write(f"- **Total Convertible:** {total_pts:,.0f} points (~${max_dollar:,.2f} per day)")
         st.write(f"- **Per-User Cap:** {per_user:,.2f} points")
 
 else:
@@ -89,7 +93,16 @@ else:
     sand_reserve = st.number_input("Initial SAND Reserve", min_value=0.0, value=10000.0)
     circ_supply = st.number_input("Starting Circulating Supply of SAND", min_value=0.0, value=1_000_000.0)
     sim_days = st.slider("Simulation Horizon (days)", min_value=1, max_value=365, value=365)
+
     if st.button("Simulate Allocation"):
+        # display daily and monthly $ volume
+        daily_points = avg_dau * avg_conv
+        daily_sand = daily_points * price_per_point
+        daily_dollars = daily_sand
+        monthly_dollars = daily_dollars * 30
+        st.write(f"- **Daily Conversion Volume:** {daily_points:,.0f} points (~${daily_dollars:,.2f})")
+        st.write(f"- **Monthly Conversion Volume:** ~${monthly_dollars:,.2f}")
+        # run simulation
         calc = LoyaltyCapCalculator(
             avg_active_users=avg_dau,
             avg_conversion_per_user=avg_conv,
@@ -97,7 +110,7 @@ else:
             circulating_supply=circ_supply,
             price_per_point=price_per_point
         )
-        reserve_series, supply_series, ruin, inflation = calc.simulate_allocation(days=sim_days)
+        reserve_series, inflation_series, ruin = calc.simulate_allocation(days=sim_days)
         # Plot reserve
         fig1, ax1 = plt.subplots()
         ax1.plot(range(1, sim_days+1), reserve_series)
@@ -107,16 +120,15 @@ else:
             ax1.axvline(ruin, color='red', linestyle='--', label=f'Reserve Empty Day: {ruin}')
             ax1.legend()
         st.pyplot(fig1)
-        # Plot supply
+        # Plot inflation %
         fig2, ax2 = plt.subplots()
-        ax2.plot(range(1, sim_days+1), supply_series)
+        ax2.plot(range(1, sim_days+1), inflation_series)
         ax2.set_xlabel('Day')
-        ax2.set_ylabel('Circulating SAND Supply')
+        ax2.set_ylabel('Cumulative Inflation (%)')
         st.pyplot(fig2)
-        st.write(f"- **Total Inflation over period:** {inflation*100:.2f}%")
         if ruin:
             st.warning(f"Reserve depleted on day {ruin}")
         else:
             st.success("Reserve remains positive through simulation.")
 
-st.caption("Use Market Depth to cap conversions by $ depth, or Reward Allocation to simulate reserve and supply.")
+st.caption("Use Market Depth to cap conversions by $ depth, or Reward Allocation to simulate reserve and inflation.")
