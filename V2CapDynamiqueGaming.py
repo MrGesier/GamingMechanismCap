@@ -76,10 +76,11 @@ st.title("Loyalty Points Cap & Allocation Simulator")
 mode = st.radio("Select Mode:", ["Market Depth", "Reward Allocation"])
 
 # Shared distribution sliders
+# Shared distribution sliders
 st.sidebar.header("User & Conversion Distributions")
-mu_u = st.sidebar.slider("DAU Mean (users/day)", 0, 20000, 5000)
-sd_u = st.sidebar.slider("DAU Std Dev", 0, 5000, 500)
-mu_c = st.sidebar.slider("Points/User Mean", 0.0, 1000.0, 200.0)
+mu_u = st.sidebar.slider("DAU Mean (users/day)", 0, 20000, 1250)
+sd_u = st.sidebar.slider("DAU Std Dev", 0, 5000, 330)
+mu_c = st.sidebar.slider("Points/User Mean", 0.0, 1000.0, 34.72)
 sd_c = st.sidebar.slider("Points/User Std Dev", 0.0, 500.0, 50.0)
 
 # Plot distributions
@@ -122,8 +123,10 @@ if mode == "Market Depth":
 else:
     st.header("Reward Allocation Mode")
     sand_price = st.number_input("SAND Price ($/token)", 0.0, 100.0, 0.10)
-    sand_reserve = st.number_input("Initial SAND Reserve (tokens)", 0.0, 1e7, 10000.0)
-    circ_supply = st.number_input("Starting Circulating Supply (tokens)", 0.0, 1e9, 1e6)
+    # Default reserve: 10,000,000 tokens
+    sand_reserve = st.number_input("Initial SAND Reserve (tokens)", 0.0, 1e9, 1e7)
+    # Default supply: 500,000,000 tokens
+    circ_supply = st.number_input("Starting Circulating Supply (tokens)", 0.0, 1e12, 5e8)
     sim_days = st.slider("Simulation Horizon (days)", 1, 730, 365)
     if st.button("Run Reward Allocation Simulation"):
         calc = LoyaltyCapCalculator(
