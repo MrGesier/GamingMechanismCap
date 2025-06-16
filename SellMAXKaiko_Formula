@@ -1,196 +1,185 @@
 # loyalty_simulator.py
-import calendar
+import calendar, numpy as np, pandas as pd, matplotlib.pyplot as plt, streamlit as st
 from datetime import datetime
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import streamlit as st
+from matplotlib.ticker import FuncFormatter, StrMethodFormatter
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LoyaltyCapCalculator
+#  Core class
 # ─────────────────────────────────────────────────────────────────────────────
 class LoyaltyCapCalculator:
     """
-    Modes
-    -----
-    • Market-Depth mode
-        – Cap conversions by a liquidity curve: Depth = k · Users^β  (β≈0.6).
-    • Reward-Allocation mode
-        – Deplete a reserve and inflate supply using user / conversion draws.
+    Market-Depth mode  -> Depth = k · Users^β  (k anchored at μ_u)
+    Reward-Allocation  -> Deplete reserve & inflate supply day by day
     """
-    def __init__(self,
-                 sand_price: float,
-                 users_dist: tuple,
-                 conv_dist: tuple,
-                 # Market-Depth mode params
-                 depth_anchor_usd: float = None,   # Depth at μ_u users (USD)
-                 beta: float = 0.60,
-                 # Reward-Allocation mode params
-                 sand_reserve: float = None,
-                 circulating_supply: float = None):
+    def __init__(self, sand_price: float,
+                 users_dist: tuple, conv_dist: tuple,
+                 # Market-Depth params
+                 depth_anchor_usd: float = None, beta: float = .60,
+                 # Allocation params
+                 sand_reserve: float=None, circulating_supply: float=None):
         self.sand_price = sand_price
-        self.users_dist = users_dist  # (μ_u, σ_u)
-        self.conv_dist  = conv_dist   # (μ_c, σ_c)
-        self.beta       = beta
+        self.users_dist, self.conv_dist = users_dist, conv_dist
+        self.beta = beta
+        self.depth_anchor_usd = depth_anchor_usd
+        self.sand_reserve = sand_reserve
+        self.circulating_supply = circulating_supply
 
-        # Determine mode
-        if depth_anchor_usd is not None:
-            self.mode = "depth"
-            self.depth_anchor_usd = depth_anchor_usd
-        else:
-            self.mode = "allocation"
-            self.sand_reserve       = sand_reserve
-            self.circulating_supply = circulating_supply
-            if sand_reserve is None or circulating_supply is None:
-                raise ValueError("Allocation mode requires reserve & supply.")
+        self.mode = "depth" if depth_anchor_usd is not None else "alloc"
+        if self.mode == "alloc" and (sand_reserve is None or circulating_supply is None):
+            raise ValueError("Allocation mode needs reserve & supply.")
 
-    # ── Market-Depth simulation ────────────────────────────────────────────
-    def cap_market_depth(self, samples: int = 1000):
+    # ── Market-Depth simulation ──────────────────────────────────────────
+    def cap_market_depth(self, samples=5000):
         μ_u, σ_u = self.users_dist
         μ_c, σ_c = self.conv_dist
 
-        # Monte-Carlo draws
-        users = np.maximum(np.random.normal(μ_u, σ_u, samples), 1)   # ≥1
-        conv  = np.maximum(np.random.normal(μ_c, σ_c, samples), 0)   # ≥0
-        demand_pts = users * conv        # points demanded
+        users  = np.maximum(np.random.normal(μ_u, σ_u, samples), 1)         # ≥1
+        points = np.maximum(np.random.normal(μ_c, σ_c, samples), 0)         # ≥0
+        demand_pts = users * points
 
-        # Kaiko-style depth curve  (anchor at μ_u, slope β)
+        # Kaiko depth curve
         k = self.depth_anchor_usd / (μ_u ** self.beta)
         depth_usd = k * users ** self.beta
-
-        # Convert USD depth → token capacity
         capacity_pts = depth_usd / self.sand_price
         capped_pts   = np.minimum(demand_pts, capacity_pts)
-        cap_per_user = capped_pts / users
+        per_user_cap = capped_pts / users
 
         return pd.DataFrame({
             "Users": users,
-            "Demand_pts": demand_pts,
             "Depth_USD": depth_usd,
+            "Demand_pts": demand_pts,
             "Capacity_pts": capacity_pts,
             "Capped_pts": capped_pts,
-            "Cap_per_user": cap_per_user
+            "Cap_per_user": per_user_cap
         })
 
-    # ── Reward-Allocation simulation ───────────────────────────────────────
+    # ── Reward-Allocation simulation ─────────────────────────────────────
     def simulate_allocation(self, days=365):
         μ_u, σ_u = self.users_dist
         μ_c, σ_c = self.conv_dist
 
-        reserve_series   = []
-        inflation_series = []
+        reserve, supply = self.sand_reserve, self.circulating_supply
+        reserve_series, infl_series = [], []
+        ruin = None
 
-        reserve = self.sand_reserve
-        supply  = self.circulating_supply
-        ruin_day = None
-
-        for day in range(1, days+1):
-            daily_users = max(np.random.normal(μ_u, σ_u), 0)
-            daily_conv  = max(np.random.normal(μ_c, σ_c), 0)
-            daily_pts   = daily_users * daily_conv
-
-            reserve = max(reserve - daily_pts, 0)
-            supply  += daily_pts
-
-            inflation_pct = (supply - self.circulating_supply) / self.circulating_supply * 100
+        for d in range(1, days+1):
+            u = max(np.random.normal(μ_u, σ_u), 0)
+            p = max(np.random.normal(μ_c, σ_c), 0)
+            pts = u * p
+            reserve = max(reserve - pts, 0)
+            supply += pts
+            infl_pct = (supply - self.circulating_supply)/self.circulating_supply*100
             reserve_series.append(reserve)
-            inflation_series.append(inflation_pct)
-            if ruin_day is None and reserve == 0:
-                ruin_day = day
+            infl_series.append(infl_pct)
+            if ruin is None and reserve == 0: ruin = d
 
-        return reserve_series, inflation_series, ruin_day
+        return reserve_series, infl_series, ruin
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Streamlit App
+#  Streamlit UI
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Loyalty Simulator", layout="centered")
-st.title("Loyalty Points Cap & Allocation Simulator")
+st.title("Loyalty Points • Depth-Scaling & Inflation Simulator")
 
 mode = st.radio("Select Mode:", ["Market Depth", "Reward Allocation"])
 
-# --- Shared distribution sliders ------------------------------------------
-st.sidebar.header("User & Conversion Distributions")
-μ_u = st.sidebar.slider("DAU Mean (users/day)", 0, 20_000, 1_250)
-σ_u = st.sidebar.slider("DAU Std Dev",           0,  5_000,   330)
-μ_c = st.sidebar.slider("Points/User Mean",      0.0, 1_000.0, 34.72)
-σ_c = st.sidebar.slider("Points/User Std Dev",   0.0,   500.0, 50.0)
+# Shared distribution controls
+st.sidebar.header("Distributions")
+μ_u = st.sidebar.slider("Mean Daily Users (μ_u)", 0, 20000, 1250)
+σ_u = st.sidebar.slider("Std-Dev Users (σ_u)",     0,  5000,  330)
+μ_c = st.sidebar.slider("Mean Pts per User (μ_c)", 0.0, 1000.0, 34.72)
+σ_c = st.sidebar.slider("Std-Dev Pts per User",    0.0,  500.0, 50.0)
 
-# Quick PDF plots
-x_u = np.linspace(max(μ_u-3*σ_u,0), μ_u+3*σ_u, 200)
+# Quick PDFs
+x_u = np.linspace(max(μ_u-3*σ_u,0), μ_u+3*σ_u, 180)
 pdf_u = (1/(σ_u*np.sqrt(2*np.pi))) * np.exp(-0.5*((x_u-μ_u)/σ_u)**2)
-x_c = np.linspace(max(μ_c-3*σ_c,0), μ_c+3*σ_c, 200)
+x_c = np.linspace(max(μ_c-3*σ_c,0), μ_c+3*σ_c, 180)
 pdf_c = (1/(σ_c*np.sqrt(2*np.pi))) * np.exp(-0.5*((x_c-μ_c)/σ_c)**2)
-fig_pdf, (ax_u, ax_c) = plt.subplots(1,2, figsize=(8,3))
-ax_u.plot(x_u, pdf_u); ax_u.set_title('DAU PDF'); ax_u.set_xlabel('Users')
-ax_c.plot(x_c, pdf_c); ax_c.set_title('Points/User PDF'); ax_c.set_xlabel('Points')
+fig_pdf,(axu,axc)=plt.subplots(1,2,figsize=(8,3))
+axu.plot(x_u,pdf_u);axu.set_title("Users PDF");axu.set_xlabel("Users")
+axc.plot(x_c,pdf_c);axc.set_title("Pts/User PDF");axc.set_xlabel("Points")
 st.pyplot(fig_pdf)
 
-# ---------------- Market-Depth Mode ---------------------------------------
-if mode == "Market Depth":
-    st.header("Market-Depth Scaling Mode")
-
-    sand_price   = st.number_input("Token Price ($/point)", 0.0, 100.0, 0.10)
-    depth_anchor = st.number_input("Depth at μ_u Users (USD)", 0.0, 1e6, 10_000.0)
-    beta         = st.number_input("β (elasticity, 0<β≤1)", 0.10, 1.0, 0.60, 0.05)
-    samples      = st.number_input("Monte-Carlo Samples", 100, 50_000, 5_000)
+# ───────────────────────────────────────────────── Market-Depth Mode
+if mode=="Market Depth":
+    st.header("Market-Depth (Kaiko Scaling)")
+    price      = st.number_input("Token Price ($)", 0.0, 100.0, 0.10)
+    depth_μu   = st.number_input("Depth at μ_u Users ($)", 0.0, 1e6, 10_000.0)
+    beta       = st.slider("β   (elasticity)", 0.3, 1.0, 0.60, 0.05)
+    samples    = st.slider("Monte-Carlo samples", 500, 20000, 5000, 500)
 
     if st.button("Run Depth Simulation"):
         calc = LoyaltyCapCalculator(
-            sand_price          = sand_price,
-            depth_anchor_usd    = depth_anchor,
-            users_dist          = (μ_u, σ_u),
-            conv_dist           = (μ_c, σ_c),
-            beta                = beta
+            sand_price=price,
+            users_dist=(μ_u,σ_u),
+            conv_dist=(μ_c,σ_c),
+            depth_anchor_usd=depth_μu,
+            beta=beta
         )
         df = calc.cap_market_depth(samples)
 
-        st.metric("Mean Depth (USD)",      f"{df['Depth_USD'].mean():,.0f}")
-        st.metric("Mean Demand (pts)",     f"{df['Demand_pts'].mean():,.0f}")
-        st.metric("Mean Capacity (pts)",   f"{df['Capacity_pts'].mean():,.0f}")
-        st.metric("Mean Capped Demand",    f"{df['Capped_pts'].mean():,.0f}")
-        st.metric("Mean Cap per User",     f"{df['Cap_per_user'].mean():.2f}")
+        st.subheader("Key stats")
+        st.metric("Mean Depth (USD)",     f"{df['Depth_USD'].mean():,.0f}")
+        st.metric("Mean Demand (pts)",    f"{df['Demand_pts'].mean():,.0f}")
+        st.metric("Mean Capacity (pts)",  f"{df['Capacity_pts'].mean():,.0f}")
+        st.metric("Mean Cap/User",        f"{df['Cap_per_user'].mean():.1f}")
 
-        # Histogram
-        fig_h, ax_h = plt.subplots()
-        ax_h.hist(df["Demand_pts"], bins=40, alpha=0.5, label="Demand")
-        ax_h.hist(df["Capped_pts"], bins=40, alpha=0.5, label="Capped")
-        ax_h.axvline(depth_anchor/sand_price, color="red", ls="--", label="Anchor Cap")
-        ax_h.set_xlabel("Points"); ax_h.set_title("Demand vs Capped")
-        ax_h.legend()
-        st.pyplot(fig_h)
+        # Percentiles table
+        pct_df = df[["Depth_USD","Cap_per_user"]].quantile([.1,.5,.9]).T
+        pct_df.columns = ["P10","Median","P90"]
+        st.dataframe(pct_df.style.format("{:,.0f}"))
 
-# ---------------- Reward-Allocation Mode ----------------------------------
+        # Plot 1 : Demand vs Capped
+        fig1,ax1=plt.subplots()
+        ax1.hist(df["Demand_pts"],bins=40,alpha=.5,label="Demand")
+        ax1.hist(df["Capped_pts"],bins=40,alpha=.5,label="Capped")
+        ax1.axvline(depth_μu/price,color="red",ls="--",label="Anchor cap")
+        ax1.set_xlabel("Points"); ax1.set_title("Demand vs Capped")
+        ax1.legend(); st.pyplot(fig1)
+
+        # Plot 2 : Depth vs Users
+        fig2,ax2=plt.subplots()
+        ax2.scatter(df["Users"],df["Depth_USD"],s=8,alpha=.4)
+        ax2.set_xlabel("Users"); ax2.set_ylabel("Depth (USD)")
+        ax2.set_title("Depth = k·Users^β")
+        ax2.yaxis.set_major_formatter(FuncFormatter(lambda x,_:f"${x:,.0f}"))
+        ax2.xaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+        ax2.grid(True,ls=":")
+        st.pyplot(fig2)
+
+        # Plot 3 : Cap per user distribution
+        fig3,ax3=plt.subplots()
+        ax3.hist(df["Cap_per_user"],bins=40,color="tab:green",alpha=0.6)
+        ax3.set_xlabel("Cap per User (MRT/day)")
+        ax3.set_title("Distribution of Cap per User")
+        ax3.xaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+        st.pyplot(fig3)
+
+# ───────────────────────────────────────────────── Reward-Allocation Mode
 else:
     st.header("Reward-Allocation Mode")
-    sand_price      = st.number_input("Token Price ($/point)", 0.0, 100.0, 0.10)
-    sand_reserve    = st.number_input("Initial Reserve (pts)", 0.0, 1e9, 1e7)
-    circ_supply     = st.number_input("Circulating Supply (pts)", 0.0, 1e12, 5e8)
-    sim_days        = st.slider("Simulation Horizon (days)", 30, 1460, 365)
+    price  = st.number_input("Token Price ($)", 0.0, 100.0, 0.10)
+    reserve0 = st.number_input("Initial Reserve (pts)", 0.0, 1e9, 1e7)
+    supply0  = st.number_input("Circulating Supply (pts)", 0.0, 1e12, 5e8)
+    days_sim = st.slider("Simulation horizon (days)", 30, 1460, 365)
 
     if st.button("Run Allocation Simulation"):
         calc = LoyaltyCapCalculator(
-            sand_price          = sand_price,
-            users_dist          = (μ_u, σ_u),
-            conv_dist           = (μ_c, σ_c),
-            sand_reserve        = sand_reserve,
-            circulating_supply  = circ_supply
+            sand_price=price,
+            users_dist=(μ_u,σ_u),
+            conv_dist=(μ_c,σ_c),
+            sand_reserve=reserve0,
+            circulating_supply=supply0
         )
-        reserve, inflation, ruin = calc.simulate_allocation(days=sim_days)
+        reserve_series,infl_series,ruin = calc.simulate_allocation(days_sim)
 
-        st.metric("Reserve after sim", f"{reserve[-1]:,.0f} pts")
-        st.metric("Inflation",         f"{inflation[-1]:.2f} %")
+        st.metric("Reserve after sim", f"{reserve_series[-1]:,.0f} pts")
+        st.metric("Inflation",         f"{infl_series[-1]:.2f}%")
 
-        fig_r, ax_r = plt.subplots()
-        ax_r.plot(reserve); ax_r.set_title("Reserve"); ax_r.set_xlabel("Day")
-        st.pyplot(fig_r)
+        figR,axR=plt.subplots(); axR.plot(reserve_series); axR.set_title("Reserve"); st.pyplot(figR)
+        figI,axI=plt.subplots(); axI.plot(infl_series);   axI.set_title("Inflation %"); st.pyplot(figI)
 
-        fig_i, ax_i = plt.subplots()
-        ax_i.plot(inflation); ax_i.set_title("Inflation %"); ax_i.set_xlabel("Day")
-        st.pyplot(fig_i)
+        if ruin: st.warning(f"Reserve depleted day {ruin}")
+        else:    st.success("Reserve never hit zero")
 
-        if ruin:
-            st.warning(f"Reserve depleted on day {ruin}")
-        else:
-            st.success("Reserve never hit zero.")
-
-st.caption("Adjust μ, σ, β and anchor depth to explore scaling behaviour.")
+st.caption("β≈0.6: empirical Kaiko elasticity.  Adjust anchor depth to match your Tier-1 benchmark.")
